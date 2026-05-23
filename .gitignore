@@ -13,6 +13,7 @@ older*/
 environment.yml
 *zip*
 *build*
+!RepViT/sam/repvit_sam/build_sam.py
 *dist/
 *.egg-info/
 *.so
