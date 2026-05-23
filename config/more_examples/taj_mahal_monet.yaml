@@ -1,0 +1,36 @@
+runs_dir: /home/sungonce/chae/logs/wonderworld_stream3r/taj_mahal_monet
+example_name: taj_mahal_monet
+sky_images_dir: /home/sungonce/chae/logs/wonderworld_stream3r/sky_images
+
+seed: 1
+# enable guided depth diffusion
+depth_conditioning: False
+
+# use gpt to generate scene description
+use_gpt: False
+debug: True
+
+# depth model and camera/depth parameters
+depth_model: marigold
+camera_speed: 0.001
+fg_depth_range: 0.015
+depth_shift: 0.001
+sky_hard_depth: 0.02
+init_focal_length: 960
+
+# re-generate sky panorama images
+gen_sky_image: False
+# generate sky point cloud
+gen_sky: False
+
+# enable layer-wise generation
+gen_layer: False
+# load previously generated gaussians
+load_gen: False
+
+# Stream3R 쓸 때 설정해야하는 값들
+stream3r_checkpoint: ""
+stream3r_conf_threshold: 0.3
+stream3r_use_cache: True
+stream3r_use_full_image: True
+stream3r_filter_sky: True
