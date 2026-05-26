@@ -34,3 +34,7 @@ stream3r_conf_threshold: 0.3
 stream3r_use_cache: True
 stream3r_use_full_image: True
 stream3r_filter_sky: True
+
+fixed_camera_pose_path: config/camera_paths/panorama_8_after_initial.yaml
+fixed_camera_auto_advance: True
+fixed_camera_stop_after_poses: True
