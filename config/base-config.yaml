@@ -60,3 +60,4 @@ use_free_lunch: False
 fixed_camera_pose_path: null
 fixed_camera_auto_advance: False
 fixed_camera_stop_after_poses: True
+fixed_camera_save_on_complete: True

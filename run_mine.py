@@ -169,6 +169,21 @@ def load_fixed_camera_poses(path):
     return poses
 
 
+def save_gaussian_outputs(gaussians, run_dir, example):
+    print("Saving...")
+    run_save_dir = Path(run_dir)
+    run_save_dir.mkdir(parents=True, exist_ok=True)
+    ply_path = run_save_dir / 'finished_3dgs.ply'
+    splat_path = run_save_dir / f'{example}_finished_3dgs.splat'
+    gaussians.save_ply_all_with_filter(str(ply_path))
+    torch.save(gaussians.visibility_filter_all, run_save_dir / 'visibility_filter_all.pth')
+    torch.save(gaussians.is_sky_filter, run_save_dir / 'is_sky_filter.pth')
+    torch.save(gaussians.delete_mask_all, run_save_dir / 'delete_mask_all.pth')
+    gaussians.yield_splat_data(str(splat_path))
+    print(f"Saved PLY to {ply_path.resolve()} ({ply_path.stat().st_size} bytes)")
+    print(f"Saved splat to {splat_path.resolve()} ({splat_path.stat().st_size} bytes)")
+
+
 def run(config):
     global client_id, view_matrix, scene_name, latest_frame, keep_rendering, kf_gen, latest_viz, gaussians, opt, background, scene_dict, style_prompt, pt_gen, change_scene_name_by_user, undo, save, delete, exclude_sky, view_matrix_delete
 
@@ -187,6 +202,7 @@ def run(config):
     fixed_camera_pose_idx = 0
     fixed_camera_auto_advance = bool(config.get("fixed_camera_auto_advance", False))
     fixed_camera_stop_after_poses = bool(config.get("fixed_camera_stop_after_poses", True))
+    fixed_camera_save_on_complete = bool(config.get("fixed_camera_save_on_complete", True))
 
     segment_processor = OneFormerProcessor.from_pretrained("shi-labs/oneformer_ade20k_swin_large")
     segment_model = OneFormerForUniversalSegmentation.from_pretrained("shi-labs/oneformer_ade20k_swin_large").to('cuda')
@@ -347,6 +363,8 @@ def run(config):
                 message = f"[FixedCamera] Finished all {len(fixed_camera_poses)} fixed camera poses."
                 print(message)
                 socketio.emit('server-state', message, room=client_id)
+                if fixed_camera_save_on_complete:
+                    save_gaussian_outputs(gaussians, kf_gen.run_dir, example)
                 if fixed_camera_stop_after_poses:
                     break
                 fixed_camera_pose_idx = 0
@@ -364,18 +382,7 @@ def run(config):
                         gaussians.delete_points(tdgs_cam_delete)
                         delete = False
                     if save:
-                        print("Saving...")
-                        run_save_dir = Path(kf_gen.run_dir)
-                        run_save_dir.mkdir(parents=True, exist_ok=True)
-                        ply_path = run_save_dir / 'finished_3dgs.ply'
-                        splat_path = run_save_dir / f'{example}_finished_3dgs.splat'
-                        gaussians.save_ply_all_with_filter(str(ply_path))
-                        torch.save(gaussians.visibility_filter_all, run_save_dir / 'visibility_filter_all.pth')
-                        torch.save(gaussians.is_sky_filter, run_save_dir / 'is_sky_filter.pth')
-                        torch.save(gaussians.delete_mask_all, run_save_dir / 'delete_mask_all.pth')
-                        gaussians.yield_splat_data(str(splat_path))
-                        print(f"Saved PLY to {ply_path.resolve()} ({ply_path.stat().st_size} bytes)")
-                        print(f"Saved splat to {splat_path.resolve()} ({splat_path.stat().st_size} bytes)")
+                        save_gaussian_outputs(gaussians, kf_gen.run_dir, example)
                         save = False
             keep_rendering = False
         else:
@@ -388,18 +395,7 @@ def run(config):
                     gaussians.delete_points(tdgs_cam_delete)
                     delete = False
                 if save:
-                    print("Saving...")
-                    run_save_dir = Path(kf_gen.run_dir)
-                    run_save_dir.mkdir(parents=True, exist_ok=True)
-                    ply_path = run_save_dir / 'finished_3dgs.ply'
-                    splat_path = run_save_dir / f'{example}_finished_3dgs.splat'
-                    gaussians.save_ply_all_with_filter(str(ply_path))
-                    torch.save(gaussians.visibility_filter_all, run_save_dir / 'visibility_filter_all.pth')
-                    torch.save(gaussians.is_sky_filter, run_save_dir / 'is_sky_filter.pth')
-                    torch.save(gaussians.delete_mask_all, run_save_dir / 'delete_mask_all.pth')
-                    gaussians.yield_splat_data(str(splat_path))
-                    print(f"Saved PLY to {ply_path.resolve()} ({ply_path.stat().st_size} bytes)")
-                    print(f"Saved splat to {splat_path.resolve()} ({splat_path.stat().st_size} bytes)")
+                    save_gaussian_outputs(gaussians, kf_gen.run_dir, example)
                     save = False
             selected_view_matrix = view_matrix
         
@@ -799,13 +795,20 @@ if __name__ == "__main__":
     example_config = OmegaConf.load(args.example_config)
     config = OmegaConf.merge(base_config, example_config)
 
-    # Start the server on a separate thread
-    server_thread = threading.Thread(target=start_server, args=(args.port,), daemon=True)
-    server_thread.start()
+    headless_fixed_camera = (
+        config.get("fixed_camera_pose_path", None) not in (None, "")
+        and bool(config.get("fixed_camera_auto_advance", False))
+    )
+    if headless_fixed_camera:
+        print("[FixedCamera] Headless auto mode: skipping SocketIO server and live render threads.")
+    else:
+        # Start the server on a separate thread
+        server_thread = threading.Thread(target=start_server, args=(args.port,))
+        server_thread.start()
 
-    # Start the rendering loop on the main thread
-    render_thread = threading.Thread(target=render_current_scene, daemon=True)
-    render_thread.start()
+        # Start the rendering loop on a separate thread
+        render_thread = threading.Thread(target=render_current_scene)
+        render_thread.start()
 
     POSTMORTEM = config['debug']
     if POSTMORTEM:
