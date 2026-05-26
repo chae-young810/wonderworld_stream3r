@@ -55,3 +55,8 @@ use_compile: False
 rotation_path: [2, 2, 2, 2, 2, 2, 2, 2, -2, -2, -2, -2, -2, -2, -2, -2]
 num_scenes: 16
 use_free_lunch: False
+
+# Optional: use saved explicit JS-style view matrices for deterministic scene generation.
+fixed_camera_pose_path: null
+fixed_camera_auto_advance: False
+fixed_camera_stop_after_poses: True
