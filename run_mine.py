@@ -406,6 +406,7 @@ def run(config):
                         gaussians.delete_points(tdgs_cam_delete)
                         delete = False
                     if save:
+                        save_rendered_img(kf_gen, gaussians, opt, kf_gen.run_dir)
                         save_gaussian_outputs(
                             gaussians,
                             kf_gen.run_dir,
