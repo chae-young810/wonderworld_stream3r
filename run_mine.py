@@ -28,6 +28,7 @@ from util.utils import save_depth_map, prepare_scheduler, soft_stitching
 from util.utils import load_example_yaml, convert_pt3d_cam_to_3dgs_cam
 from util.segment_utils import create_mask_generator_repvit
 from util.free_lunch_utils import register_free_upblock2d, register_free_crossattn_upblock2d
+from axis import fix_splat_orientation
  
 from arguments import GSParams, CameraParams
 from gaussian_renderer import render
@@ -126,6 +127,7 @@ def apply_stream3r_defaults(config):
         "stream3r_depth_max": 0.02,
         "stream3r_sky_dilate_kernel_size": 15,
         "stream3r_use_marigold_normals": True,
+        "splat_fix_axis_on_save": True,
     }
     for key, value in defaults.items():
         if key not in config:
@@ -169,7 +171,7 @@ def load_fixed_camera_poses(path):
     return poses
 
 
-def save_gaussian_outputs(gaussians, run_dir, example):
+def save_gaussian_outputs(gaussians, run_dir, example, fix_splat_axis=True):
     print("Saving...")
     run_save_dir = Path(run_dir)
     run_save_dir.mkdir(parents=True, exist_ok=True)
@@ -180,6 +182,9 @@ def save_gaussian_outputs(gaussians, run_dir, example):
     torch.save(gaussians.is_sky_filter, run_save_dir / 'is_sky_filter.pth')
     torch.save(gaussians.delete_mask_all, run_save_dir / 'delete_mask_all.pth')
     gaussians.yield_splat_data(str(splat_path))
+    if fix_splat_axis:
+        fix_splat_orientation(str(splat_path), str(splat_path))
+        print(f"Applied axis conversion to {splat_path.resolve()}")
     print(f"Saved PLY to {ply_path.resolve()} ({ply_path.stat().st_size} bytes)")
     print(f"Saved splat to {splat_path.resolve()} ({splat_path.stat().st_size} bytes)")
 
@@ -385,7 +390,12 @@ def run(config):
                 if fixed_camera_save_rendered_frames:
                     save_rendered_camera_path(kf_gen, gaussians, opt, fixed_camera_poses, kf_gen.run_dir)
                 if fixed_camera_save_on_complete:
-                    save_gaussian_outputs(gaussians, kf_gen.run_dir, example)
+                    save_gaussian_outputs(
+                        gaussians,
+                        kf_gen.run_dir,
+                        example,
+                        fix_splat_axis=bool(config.get("splat_fix_axis_on_save", True)),
+                    )
                 if fixed_camera_stop_after_poses:
                     break
                 fixed_camera_pose_idx = 0
@@ -403,7 +413,12 @@ def run(config):
                         gaussians.delete_points(tdgs_cam_delete)
                         delete = False
                     if save:
-                        save_gaussian_outputs(gaussians, kf_gen.run_dir, example)
+                        save_gaussian_outputs(
+                            gaussians,
+                            kf_gen.run_dir,
+                            example,
+                            fix_splat_axis=bool(config.get("splat_fix_axis_on_save", True)),
+                        )
                         save = False
             keep_rendering = False
         else:
@@ -416,7 +431,12 @@ def run(config):
                     gaussians.delete_points(tdgs_cam_delete)
                     delete = False
                 if save:
-                    save_gaussian_outputs(gaussians, kf_gen.run_dir, example)
+                    save_gaussian_outputs(
+                        gaussians,
+                        kf_gen.run_dir,
+                        example,
+                        fix_splat_axis=bool(config.get("splat_fix_axis_on_save", True)),
+                    )
                     save = False
             selected_view_matrix = view_matrix
         

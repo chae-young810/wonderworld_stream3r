@@ -1,20 +1,23 @@
 import numpy as np
 import os
 
-def fix_splat_orientation(input_file, output_file):
+SPLAT_GAUSSIAN_BYTES = 32
+
+
+def fix_splat_orientation_bytes(splat_data):
     # .splat 파일은 가우시안당 32바이트 구조입니다.
     # 구조: pos(3*float32), scale(3*float32), color(4*uint8), rot(4*uint8)
-    
-    if not os.path.exists(input_file):
-        print(f"파일을 찾을 수 없습니다: {input_file}")
-        return
 
-    # 바이너리 데이터 로드
-    data = np.fromfile(input_file, dtype=np.uint8)
-    num_gaussians = len(data) // 32
+    data = np.frombuffer(splat_data, dtype=np.uint8).copy()
+    if len(data) % SPLAT_GAUSSIAN_BYTES != 0:
+        raise ValueError(
+            f".splat data size must be a multiple of {SPLAT_GAUSSIAN_BYTES} bytes, got {len(data)} bytes."
+        )
+
+    num_gaussians = len(data) // SPLAT_GAUSSIAN_BYTES
     
     # 2D 배열로 재구성 (N x 32)
-    gaussians = data.reshape(num_gaussians, 32)
+    gaussians = data.reshape(num_gaussians, SPLAT_GAUSSIAN_BYTES)
     
     # 1. 위치(Position) 수정 (앞 12바이트: x, y, z)
     # float32 뷰로 변환하여 좌표 추출
@@ -44,12 +47,30 @@ def fix_splat_orientation(input_file, output_file):
     # 다시 uint8 범위(0~255)로 양자화하여 저장
     gaussians[:, 28:32] = np.clip(new_q * 128.0 + 128.0, 0, 255).astype(np.uint8)
     
-    # 파일 저장
-    gaussians.tofile(output_file)
+    return gaussians.tobytes()
+
+
+def fix_splat_orientation(input_file, output_file):
+    if not os.path.exists(input_file):
+        print(f"파일을 찾을 수 없습니다: {input_file}")
+        return
+
+    with open(input_file, "rb") as f:
+        splat_data = f.read()
+
+    fixed_splat_data = fix_splat_orientation_bytes(splat_data)
+
+    with open(output_file, "wb") as f:
+        f.write(fixed_splat_data)
     print(f"회전 수정 완료: {output_file}")
 
-# --- 실행부 ---
-input_path = "/home/sungonce/chae/logs/wonderworld_stream3r/cathedral_1/Gen-23-05_13-55-56/cathedral_1_finished_3dgs.splat"   # 원본 파일명
-output_path = "/home/sungonce/chae/logs/wonderworld_stream3r/cathedral_1/Gen-23-05_13-55-56/cathedral_1_finished_3dgs_fixed_axis.splat" # 결과 파일명
 
-fix_splat_orientation(input_path, output_path)
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Apply a 180-degree X-axis conversion to a .splat file.")
+    parser.add_argument("input_path", help="Input .splat path")
+    parser.add_argument("output_path", help="Output .splat path")
+    args = parser.parse_args()
+
+    fix_splat_orientation(args.input_path, args.output_path)
