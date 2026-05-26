@@ -184,6 +184,24 @@ def save_gaussian_outputs(gaussians, run_dir, example):
     print(f"Saved splat to {splat_path.resolve()} ({splat_path.stat().st_size} bytes)")
 
 
+def save_rendered_camera_path(kf_gen, gaussians, opt, camera_poses, run_dir):
+    render_dir = Path(run_dir) / "rendered_frames"
+    render_dir.mkdir(parents=True, exist_ok=True)
+
+    with torch.no_grad():
+        front_cam = convert_pt3d_cam_to_3dgs_cam(kf_gen.get_camera_at_origin(), xyz_scale=xyz_scale)
+        rendered = render(front_cam, gaussians, opt, background, render_visible=True)["render"]
+        ToPILImage()(rendered).save(render_dir / "000_front.png")
+
+        for idx, pose in enumerate(camera_poses, start=1):
+            pt3d_cam = kf_gen.get_camera_by_js_view_matrix(pose, xyz_scale=xyz_scale)
+            tdgs_cam = convert_pt3d_cam_to_3dgs_cam(pt3d_cam, xyz_scale=xyz_scale)
+            rendered = render(tdgs_cam, gaussians, opt, background, render_visible=True)["render"]
+            ToPILImage()(rendered).save(render_dir / f"{idx:03d}_pose_{idx:02d}.png")
+
+    print(f"Saved rendered camera-path frames to {render_dir.resolve()}")
+
+
 def run(config):
     global client_id, view_matrix, scene_name, latest_frame, keep_rendering, kf_gen, latest_viz, gaussians, opt, background, scene_dict, style_prompt, pt_gen, change_scene_name_by_user, undo, save, delete, exclude_sky, view_matrix_delete
 
@@ -203,6 +221,7 @@ def run(config):
     fixed_camera_auto_advance = bool(config.get("fixed_camera_auto_advance", False))
     fixed_camera_stop_after_poses = bool(config.get("fixed_camera_stop_after_poses", True))
     fixed_camera_save_on_complete = bool(config.get("fixed_camera_save_on_complete", True))
+    fixed_camera_save_rendered_frames = bool(config.get("fixed_camera_save_rendered_frames", True))
 
     segment_processor = OneFormerProcessor.from_pretrained("shi-labs/oneformer_ade20k_swin_large")
     segment_model = OneFormerForUniversalSegmentation.from_pretrained("shi-labs/oneformer_ade20k_swin_large").to('cuda')
@@ -363,6 +382,8 @@ def run(config):
                 message = f"[FixedCamera] Finished all {len(fixed_camera_poses)} fixed camera poses."
                 print(message)
                 socketio.emit('server-state', message, room=client_id)
+                if fixed_camera_save_rendered_frames:
+                    save_rendered_camera_path(kf_gen, gaussians, opt, fixed_camera_poses, kf_gen.run_dir)
                 if fixed_camera_save_on_complete:
                     save_gaussian_outputs(gaussians, kf_gen.run_dir, example)
                 if fixed_camera_stop_after_poses:
