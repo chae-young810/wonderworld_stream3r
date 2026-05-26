@@ -189,11 +189,13 @@ def save_gaussian_outputs(gaussians, run_dir, example, fix_splat_axis=True):
     print(f"Saved splat to {splat_path.resolve()} ({splat_path.stat().st_size} bytes)")
 
 
-def save_rendered_img(kf_gen, gaussians, opt, run_dir):
+def save_rendered_img(kf_gen, gaussians, opt, run_dir, render_view_matrix=None):
     render_path = Path(run_dir) / 'rendered_img.png'
+    if render_view_matrix is None:
+        render_view_matrix = view_matrix_fixed
     with torch.no_grad():
         tdgs_cam = convert_pt3d_cam_to_3dgs_cam(
-            kf_gen.get_camera_by_js_view_matrix(view_matrix_fixed, xyz_scale=xyz_scale, big_view=True),
+            kf_gen.get_camera_by_js_view_matrix(render_view_matrix, xyz_scale=xyz_scale, big_view=True),
             xyz_scale=xyz_scale,
         )
         tdgs_cam.image_width = 1536
@@ -221,6 +223,10 @@ def run(config):
     fixed_camera_auto_advance = bool(config.get("fixed_camera_auto_advance", False))
     fixed_camera_stop_after_poses = bool(config.get("fixed_camera_stop_after_poses", True))
     fixed_camera_save_on_complete = bool(config.get("fixed_camera_save_on_complete", True))
+    fixed_camera_render_view_matrix = _normalize_view_matrix(
+        config.get("fixed_camera_render_view_matrix", view_matrix_fixed),
+        "fixed_camera_render_view_matrix",
+    )
 
     segment_processor = OneFormerProcessor.from_pretrained("shi-labs/oneformer_ade20k_swin_large")
     segment_model = OneFormerForUniversalSegmentation.from_pretrained("shi-labs/oneformer_ade20k_swin_large").to('cuda')
@@ -382,7 +388,13 @@ def run(config):
                 print(message)
                 socketio.emit('server-state', message, room=client_id)
                 if fixed_camera_save_on_complete:
-                    save_rendered_img(kf_gen, gaussians, opt, kf_gen.run_dir)
+                    save_rendered_img(
+                        kf_gen,
+                        gaussians,
+                        opt,
+                        kf_gen.run_dir,
+                        render_view_matrix=fixed_camera_render_view_matrix,
+                    )
                     save_gaussian_outputs(
                         gaussians,
                         kf_gen.run_dir,
@@ -406,7 +418,13 @@ def run(config):
                         gaussians.delete_points(tdgs_cam_delete)
                         delete = False
                     if save:
-                        save_rendered_img(kf_gen, gaussians, opt, kf_gen.run_dir)
+                        save_rendered_img(
+                            kf_gen,
+                            gaussians,
+                            opt,
+                            kf_gen.run_dir,
+                            render_view_matrix=fixed_camera_render_view_matrix,
+                        )
                         save_gaussian_outputs(
                             gaussians,
                             kf_gen.run_dir,
