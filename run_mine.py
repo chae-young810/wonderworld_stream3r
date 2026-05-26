@@ -28,6 +28,7 @@ from util.utils import save_depth_map, prepare_scheduler, soft_stitching
 from util.utils import load_example_yaml, convert_pt3d_cam_to_3dgs_cam
 from util.segment_utils import create_mask_generator_repvit
 from util.free_lunch_utils import register_free_upblock2d, register_free_crossattn_upblock2d
+from axis import fix_splat_orientation
  
 from arguments import GSParams, CameraParams
 from gaussian_renderer import render
@@ -126,6 +127,7 @@ def apply_stream3r_defaults(config):
         "stream3r_depth_max": 0.02,
         "stream3r_sky_dilate_kernel_size": 15,
         "stream3r_use_marigold_normals": True,
+        "splat_fix_axis_on_save": True,
     }
     for key, value in defaults.items():
         if key not in config:
@@ -134,6 +136,72 @@ def apply_stream3r_defaults(config):
         config["sky_images_dir"] = str(Path(config["runs_dir"]).parent / "sky_images")
     config["geometry_backend"] = str(config["geometry_backend"]).lower()
     return config
+
+
+def _normalize_view_matrix(matrix, pose_idx):
+    matrix = np.asarray(matrix, dtype=np.float32)
+    if matrix.shape == (4, 4):
+        return matrix.reshape(-1).tolist()
+    if matrix.shape == (16,):
+        return matrix.tolist()
+    raise ValueError(f"Fixed camera pose #{pose_idx} must be a 4x4 matrix or flat 16-value list, got shape {matrix.shape}.")
+
+
+def load_fixed_camera_poses(path):
+    if path in (None, ""):
+        return None
+
+    pose_config = OmegaConf.load(path)
+    pose_data = OmegaConf.to_container(pose_config, resolve=True)
+    if isinstance(pose_data, dict):
+        for key in ("view_matrices", "camera_poses", "poses"):
+            if key in pose_data:
+                pose_data = pose_data[key]
+                break
+        else:
+            raise ValueError(
+                f"Fixed camera pose file {path} must contain one of: view_matrices, camera_poses, poses."
+            )
+
+    if not isinstance(pose_data, list) or len(pose_data) == 0:
+        raise ValueError(f"Fixed camera pose file {path} must contain a non-empty list of poses.")
+
+    poses = [_normalize_view_matrix(matrix, idx) for idx, matrix in enumerate(pose_data)]
+    print(f"[FixedCamera] Loaded {len(poses)} camera poses from {path}")
+    return poses
+
+
+def save_gaussian_outputs(gaussians, run_dir, example, fix_splat_axis=True):
+    print("Saving...")
+    run_save_dir = Path(run_dir)
+    run_save_dir.mkdir(parents=True, exist_ok=True)
+    ply_path = run_save_dir / 'finished_3dgs.ply'
+    splat_path = run_save_dir / f'{example}_finished_3dgs.splat'
+    gaussians.save_ply_all_with_filter(str(ply_path))
+    torch.save(gaussians.visibility_filter_all, run_save_dir / 'visibility_filter_all.pth')
+    torch.save(gaussians.is_sky_filter, run_save_dir / 'is_sky_filter.pth')
+    torch.save(gaussians.delete_mask_all, run_save_dir / 'delete_mask_all.pth')
+    gaussians.yield_splat_data(str(splat_path))
+    if fix_splat_axis:
+        fix_splat_orientation(str(splat_path), str(splat_path))
+        print(f"Applied axis conversion to {splat_path.resolve()}")
+    print(f"Saved PLY to {ply_path.resolve()} ({ply_path.stat().st_size} bytes)")
+    print(f"Saved splat to {splat_path.resolve()} ({splat_path.stat().st_size} bytes)")
+
+
+def save_rendered_img(kf_gen, gaussians, opt, run_dir, render_view_matrix=None):
+    render_path = Path(run_dir) / 'rendered_img.png'
+    if render_view_matrix is None:
+        render_view_matrix = view_matrix_fixed
+    with torch.no_grad():
+        tdgs_cam = convert_pt3d_cam_to_3dgs_cam(
+            kf_gen.get_camera_by_js_view_matrix(render_view_matrix, xyz_scale=xyz_scale, big_view=True),
+            xyz_scale=xyz_scale,
+        )
+        tdgs_cam.image_width = 1536
+        rendered_img = render(tdgs_cam, gaussians, opt, background, render_visible=True)['render']
+        ToPILImage()(rendered_img).save(render_path)
+    print(f"Saved rendered image to {render_path.resolve()}")
 
 
 def run(config):
@@ -150,6 +218,15 @@ def run(config):
     if geometry_backend == "stream3r" and config.get("gen_layer", False):
         print("[Stream3R] gen_layer=True is not supported with the Stream3R backend yet; forcing gen_layer=False.")
         config["gen_layer"] = False
+    fixed_camera_poses = load_fixed_camera_poses(config.get("fixed_camera_pose_path", None))
+    fixed_camera_pose_idx = 0
+    fixed_camera_auto_advance = bool(config.get("fixed_camera_auto_advance", False))
+    fixed_camera_stop_after_poses = bool(config.get("fixed_camera_stop_after_poses", True))
+    fixed_camera_save_on_complete = bool(config.get("fixed_camera_save_on_complete", True))
+    fixed_camera_render_view_matrix = _normalize_view_matrix(
+        config.get("fixed_camera_render_view_matrix", view_matrix_fixed),
+        "fixed_camera_render_view_matrix",
+    )
 
     segment_processor = OneFormerProcessor.from_pretrained("shi-labs/oneformer_ade20k_swin_large")
     segment_model = OneFormerForUniversalSegmentation.from_pretrained("shi-labs/oneformer_ade20k_swin_large").to('cuda')
@@ -304,29 +381,76 @@ def run(config):
         socketio.emit('scene-prompt', scene_name, room=client_id)
         print('Waiting for scene gen signal...')
         socketio.emit('server-state', 'Waiting to generate new scenes...', room=client_id)
-        
-        while keep_rendering:
-            time.sleep(0.05)
-            if delete:
-                print("Deleting...")
-                current_pt3d_cam_delete = kf_gen.get_camera_by_js_view_matrix(view_matrix_delete, xyz_scale=xyz_scale)
-                tdgs_cam_delete = convert_pt3d_cam_to_3dgs_cam(current_pt3d_cam_delete, xyz_scale=xyz_scale)
-                gaussians.delete_points(tdgs_cam_delete)
-                delete = False
-            if save:
-                print("Saving...")
-                run_save_dir = Path(kf_gen.run_dir)
-                run_save_dir.mkdir(parents=True, exist_ok=True)
-                ply_path = run_save_dir / 'finished_3dgs.ply'
-                splat_path = run_save_dir / f'{example}_finished_3dgs.splat'
-                gaussians.save_ply_all_with_filter(str(ply_path))
-                torch.save(gaussians.visibility_filter_all, run_save_dir / 'visibility_filter_all.pth')
-                torch.save(gaussians.is_sky_filter, run_save_dir / 'is_sky_filter.pth')
-                torch.save(gaussians.delete_mask_all, run_save_dir / 'delete_mask_all.pth')
-                gaussians.yield_splat_data(str(splat_path))
-                print(f"Saved PLY to {ply_path.resolve()} ({ply_path.stat().st_size} bytes)")
-                print(f"Saved splat to {splat_path.resolve()} ({splat_path.stat().st_size} bytes)")
-                save = False
+
+        if fixed_camera_poses is not None:
+            if fixed_camera_pose_idx >= len(fixed_camera_poses):
+                message = f"[FixedCamera] Finished all {len(fixed_camera_poses)} fixed camera poses."
+                print(message)
+                socketio.emit('server-state', message, room=client_id)
+                if fixed_camera_save_on_complete:
+                    save_rendered_img(
+                        kf_gen,
+                        gaussians,
+                        opt,
+                        kf_gen.run_dir,
+                        render_view_matrix=fixed_camera_render_view_matrix,
+                    )
+                    save_gaussian_outputs(
+                        gaussians,
+                        kf_gen.run_dir,
+                        example,
+                        fix_splat_axis=bool(config.get("splat_fix_axis_on_save", True)),
+                    )
+                if fixed_camera_stop_after_poses:
+                    break
+                fixed_camera_pose_idx = 0
+
+            selected_view_matrix = fixed_camera_poses[fixed_camera_pose_idx]
+            print(f"[FixedCamera] Using pose {fixed_camera_pose_idx + 1}/{len(fixed_camera_poses)}")
+            fixed_camera_pose_idx += 1
+            if not fixed_camera_auto_advance:
+                while keep_rendering:
+                    time.sleep(0.05)
+                    if delete:
+                        print("Deleting...")
+                        current_pt3d_cam_delete = kf_gen.get_camera_by_js_view_matrix(view_matrix_delete, xyz_scale=xyz_scale)
+                        tdgs_cam_delete = convert_pt3d_cam_to_3dgs_cam(current_pt3d_cam_delete, xyz_scale=xyz_scale)
+                        gaussians.delete_points(tdgs_cam_delete)
+                        delete = False
+                    if save:
+                        save_rendered_img(
+                            kf_gen,
+                            gaussians,
+                            opt,
+                            kf_gen.run_dir,
+                            render_view_matrix=fixed_camera_render_view_matrix,
+                        )
+                        save_gaussian_outputs(
+                            gaussians,
+                            kf_gen.run_dir,
+                            example,
+                            fix_splat_axis=bool(config.get("splat_fix_axis_on_save", True)),
+                        )
+                        save = False
+            keep_rendering = False
+        else:
+            while keep_rendering:
+                time.sleep(0.05)
+                if delete:
+                    print("Deleting...")
+                    current_pt3d_cam_delete = kf_gen.get_camera_by_js_view_matrix(view_matrix_delete, xyz_scale=xyz_scale)
+                    tdgs_cam_delete = convert_pt3d_cam_to_3dgs_cam(current_pt3d_cam_delete, xyz_scale=xyz_scale)
+                    gaussians.delete_points(tdgs_cam_delete)
+                    delete = False
+                if save:
+                    save_gaussian_outputs(
+                        gaussians,
+                        kf_gen.run_dir,
+                        example,
+                        fix_splat_axis=bool(config.get("splat_fix_axis_on_save", True)),
+                    )
+                    save = False
+            selected_view_matrix = view_matrix
         
         if undo:
             print("Undoing...")
@@ -351,7 +475,7 @@ def run(config):
         ###### ------------------ Keyframe (the major part of point clouds) generation ------------------ ######        
         kf_gen.set_kf_param(inpainting_resolution=config['inpainting_resolution_gen'],
                             inpainting_prompt=inpainting_prompt, adaptive_negative_prompt=adaptive_negative_prompt)
-        current_pt3d_cam = kf_gen.get_camera_by_js_view_matrix(view_matrix, xyz_scale=xyz_scale)
+        current_pt3d_cam = kf_gen.get_camera_by_js_view_matrix(selected_view_matrix, xyz_scale=xyz_scale)
         tdgs_cam = convert_pt3d_cam_to_3dgs_cam(current_pt3d_cam, xyz_scale=xyz_scale)
         kf_gen.set_current_camera(current_pt3d_cam, archive_camera=True)
         
@@ -428,7 +552,7 @@ def run(config):
         kf_gen.image_latest = recomposed
 
         if geometry_backend == "stream3r":
-            valid_px_mask = outpaint_mask * (~kf_gen.sky_mask_latest)
+            valid_px_mask = ~kf_gen.sky_mask_latest
             kf_gen.update_current_pc_by_stream3r(
                 image=kf_gen.image_latest,
                 user_camera=current_pt3d_cam,
@@ -468,11 +592,11 @@ def run(config):
                 kf_gen.depth_latest[wrong_depth_mask] = kf_gen.depth_latest_init[wrong_depth_mask] + 0.0001
                 kf_gen.depth_latest = kf_gen.mask_disocclusion * kf_gen.depth_latest + (1-kf_gen.mask_disocclusion) * kf_gen.depth_latest_init
                 kf_gen.update_sky_mask()
-                valid_px_mask = outpaint_mask * (~kf_gen.sky_mask_latest)
+                valid_px_mask = ~kf_gen.sky_mask_latest
                 kf_gen.update_current_pc_by_kf(image=kf_gen.image_latest, depth=kf_gen.depth_latest, valid_mask=valid_px_mask)  # Base only
                 kf_gen.update_current_pc_by_kf(image=kf_gen.image_latest_init, depth=kf_gen.depth_latest_init, valid_mask=kf_gen.mask_disocclusion*outpaint_mask, gen_layer=True)  # Object layer
             else:
-                valid_px_mask = outpaint_mask * (~kf_gen.sky_mask_latest)
+                valid_px_mask = ~kf_gen.sky_mask_latest
                 kf_gen.update_current_pc_by_kf(image=kf_gen.image_latest, depth=kf_gen.depth_latest, valid_mask=valid_px_mask)
         kf_gen.archive_latest()
 
@@ -724,13 +848,20 @@ if __name__ == "__main__":
     example_config = OmegaConf.load(args.example_config)
     config = OmegaConf.merge(base_config, example_config)
 
-    # Start the server on a separate thread
-    server_thread = threading.Thread(target=start_server, args=(args.port,))
-    server_thread.start()
+    headless_fixed_camera = (
+        config.get("fixed_camera_pose_path", None) not in (None, "")
+        and bool(config.get("fixed_camera_auto_advance", False))
+    )
+    if headless_fixed_camera:
+        print("[FixedCamera] Headless auto mode: skipping SocketIO server and live render threads.")
+    else:
+        # Start the server on a separate thread
+        server_thread = threading.Thread(target=start_server, args=(args.port,))
+        server_thread.start()
 
-    # Start the rendering loop on the main thread
-    render_thread = threading.Thread(target=render_current_scene)
-    render_thread.start()
+        # Start the rendering loop on a separate thread
+        render_thread = threading.Thread(target=render_current_scene)
+        render_thread.start()
 
     POSTMORTEM = config['debug']
     if POSTMORTEM:
